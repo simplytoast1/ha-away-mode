@@ -1,0 +1,2 @@
+# ha-away-mode
+

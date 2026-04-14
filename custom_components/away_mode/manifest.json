@@ -1,0 +1,11 @@
+{
+  "domain": "away_mode",
+  "name": "Away Mode",
+  "codeowners": ["@simplytoast1"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/simplytoast1/ha-away-mode",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/simplytoast1/ha-away-mode/issues",
+  "version": "1.0.0"
+}

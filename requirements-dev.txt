@@ -1,0 +1,3 @@
+# Local checks: pip install -r requirements-dev.txt && pytest
+pytest-homeassistant-custom-component>=0.13.0
+ruff>=0.8.0

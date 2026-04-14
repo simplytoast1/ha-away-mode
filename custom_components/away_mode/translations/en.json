@@ -1,0 +1,81 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Away Mode Setup",
+        "description": "Configure presence simulation to make your home look occupied while you're away.",
+        "data": {
+          "entities": "Entities to simulate",
+          "start_type": "Simulation starts at",
+          "end_type": "Simulation ends at",
+          "intensity": "Activity intensity"
+        },
+        "data_description": {
+          "entities": "Select lights, switches, fans, and media players to include in the simulation. These will be turned on and off at random intervals to simulate someone being home.",
+          "start_type": "Choose when the simulation window begins each day. Sunset adjusts automatically with the seasons.",
+          "end_type": "Choose when the simulation window ends each day. All simulated entities will be turned off at this time.",
+          "intensity": "Controls how active the house appears. Low: max 20% of entities on, long gaps between changes. Medium: max 35% on, moderate gaps. High: max 50% on, frequent changes."
+        }
+      },
+      "time_details": {
+        "title": "Custom Time Settings",
+        "description": "Set the exact times for your simulation window. Times are in your Home Assistant configured timezone.",
+        "data": {
+          "custom_start_time": "Start time",
+          "custom_end_time": "End time"
+        },
+        "data_description": {
+          "custom_start_time": "The time each day when the simulation should begin.",
+          "custom_end_time": "The time each day when the simulation should end and all entities turn off."
+        }
+      }
+    },
+    "error": {
+      "no_entities": "Please select at least one entity to simulate.",
+      "invalid_time_window": "Start time must be different from end time.",
+      "missing_start_time": "Please specify a custom start time.",
+      "missing_end_time": "Please specify a custom end time."
+    },
+    "abort": {
+      "already_configured": "Away Mode is already configured. Use the options flow to change settings."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Away Mode Settings",
+        "description": "Update your presence simulation settings. Changes take effect after saving.",
+        "data": {
+          "entities": "Entities to simulate",
+          "start_type": "Simulation starts at",
+          "end_type": "Simulation ends at",
+          "intensity": "Activity intensity"
+        },
+        "data_description": {
+          "entities": "Select lights, switches, fans, and media players to include in the simulation. These will be turned on and off at random intervals to simulate someone being home.",
+          "start_type": "Choose when the simulation window begins each day. Sunset adjusts automatically with the seasons.",
+          "end_type": "Choose when the simulation window ends each day. All simulated entities will be turned off at this time.",
+          "intensity": "Controls how active the house appears. Low: max 20% of entities on, long gaps between changes. Medium: max 35% on, moderate gaps. High: max 50% on, frequent changes."
+        }
+      },
+      "time_details": {
+        "title": "Custom Time Settings",
+        "description": "Set the exact times for your simulation window.",
+        "data": {
+          "custom_start_time": "Start time",
+          "custom_end_time": "End time"
+        },
+        "data_description": {
+          "custom_start_time": "The time each day when the simulation should begin.",
+          "custom_end_time": "The time each day when the simulation should end and all entities turn off."
+        }
+      }
+    },
+    "error": {
+      "no_entities": "Please select at least one entity to simulate.",
+      "invalid_time_window": "Start time must be different from end time.",
+      "missing_start_time": "Please specify a custom start time.",
+      "missing_end_time": "Please specify a custom end time."
+    }
+  }
+}

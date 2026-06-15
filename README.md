@@ -10,12 +10,14 @@ Existing solutions either require replaying database history (complex, fragile) 
 
 - **Simple setup** — Pick your entities, set a time window, choose an intensity level. That's it.
 - **Sunset/sunrise aware** — Time windows can start or end at sunset or sunrise, automatically adjusting to your location and the season.
+- **Overnight windows:** Windows that cross midnight (for example sunset to sunrise, or 22:00 to 02:00) keep simulating through the early-morning hours.
 - **Realistic patterns** — Randomized timing gaps, weighted entity selection, varied on-durations, and a simultaneous entity cap prevent predictable sequences.
 - **Weighted selection** — Entities that have been off the longest are more likely to turn on next, simulating natural room-to-room movement.
 - **Three intensity levels** — Low (quiet house), Medium (typical evening), High (busy household).
 - **Survives restarts** — If Home Assistant restarts while Away Mode is on, the simulation automatically resumes.
 - **No database dependency** — Patterns are generated algorithmically. No history or recorder integration required.
-- **Single switch control** — Toggle `switch.away_mode` from the UI, automations, scripts, scenes, or voice assistants.
+- **Multiple instances:** Run several Away Modes (for example Downstairs and Upstairs), each with its own name, entities, schedule, and intensity. Each appears as its own device.
+- **Switch control:** Toggle the Away Mode switch from the UI, automations, scripts, scenes, or voice assistants. The default entity id is `switch.away_mode`.
 
 ## Installation
 
@@ -39,6 +41,7 @@ Existing solutions either require replaying database history (complex, fragile) 
 2. Click **Add Integration** (bottom right)
 3. Search for **Away Mode** and select it
 4. You'll see a single setup form with:
+   - **Name:** A name for this instance (defaults to "Away Mode"). Used as the device and switch name, so you can tell multiple instances apart.
    - **Entities to simulate** — Pick the lights, switches, fans, and media players you want included
    - **Simulation starts at** — Choose Sunset, Sunrise, or Custom time
    - **Simulation ends at** — Choose Sunset, Sunrise, or Custom time
@@ -56,7 +59,11 @@ Existing solutions either require replaying database history (complex, fragile) 
 
 ### Changing Settings Later
 
-Go to **Settings** > **Devices & Services**, find the **Away Mode** entry, and click **Configure**.
+Go to **Settings** > **Devices & Services**, find the **Away Mode** entry, and click **Configure**. Changes apply immediately without restarting the simulation: only entities you removed are turned off, so any unchanged lights that are currently on stay on.
+
+### Multiple Instances
+
+You can add Away Mode more than once. For example, run a "Downstairs" instance on one schedule and an "Upstairs" instance on another. Repeat the configuration steps above and give each a distinct name. Each instance gets its own device and switch named after it (for example `switch.downstairs`, `switch.upstairs`), with its own entities, time window, and intensity.
 
 ## Usage
 
@@ -140,6 +147,7 @@ Every night will look different. No two days produce the same pattern.
 - The simulation **only runs during the configured time window**. Outside the window, no entities are changed.
 - When you **turn the switch off**, all currently simulated entities are turned off immediately.
 - If you **turn the switch on outside the time window**, it will wait and automatically start when the window opens.
+- Time windows can **cross midnight** (for example sunset to sunrise, or 22:00 to 02:00); the simulation keeps running through the early-morning hours.
 - Sunset/sunrise times are **recalculated daily** at midnight, so seasonal changes are handled automatically.
 - You can include the `switch.away_mode` entity on your dashboard for quick toggling.
 

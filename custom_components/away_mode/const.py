@@ -70,6 +70,11 @@ CONF_CUSTOM_END_TIME = "custom_end_time"
 # "medium" provides a good balance of realism without being too active or too quiet.
 DEFAULT_INTENSITY = "medium"
 
+# The default name for an Away Mode instance. Used as the config entry title,
+# the service-device name, and the switch name when the user doesn't provide one.
+# Stored under homeassistant.const.CONF_NAME ("name") in entry.data.
+DEFAULT_NAME = "Away Mode"
+
 # =============================================================================
 # Intensity Profiles
 # =============================================================================

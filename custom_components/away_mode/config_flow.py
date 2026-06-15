@@ -17,9 +17,10 @@ two flows:
    re-adding the integration.
 
 Design decisions:
-  - Only one instance of Away Mode is allowed. The flow aborts if the integration
-    is already configured, since a single simulation with one set of entities
-    and one time window covers the typical use case.
+  - Multiple instances are supported. Each config entry gets its own name,
+    entities, time window, and intensity, so users can run several (e.g.
+    "Downstairs" and "Upstairs") side by side. Storage and entity unique_ids
+    are keyed by entry_id, so there are no collisions.
   - The "start_type" and "end_type" selector values ("sunset", "sunrise", "custom")
     are UI-only — the final config entry stores the resolved value (e.g., "sunset"
     or "22:30:00") in CONF_TIME_WINDOW_START / CONF_TIME_WINDOW_END.
@@ -33,12 +34,12 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     OptionsFlow,
 )
+from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import (
@@ -47,6 +48,7 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
     TimeSelector,
 )
 
@@ -60,6 +62,7 @@ from .const import (
     CONF_TIME_WINDOW_END,
     CONF_TIME_WINDOW_START,
     DEFAULT_INTENSITY,
+    DEFAULT_NAME,
     DOMAIN,
 )
 
@@ -91,12 +94,14 @@ INTENSITY_OPTIONS = [
 
 def _build_user_schema(
     defaults: dict[str, Any] | None = None,
+    include_name: bool = True,
 ) -> vol.Schema:
     """
     Build the schema for the main configuration step (step 1).
 
     This schema defines the form fields the user sees when first setting up
     Away Mode or when opening the options flow. It includes:
+      - An optional name (initial setup only) used as the instance/device name
       - An entity multi-selector filtered to only show lights, switches,
         media players, and fans (the entity types we can meaningfully simulate)
       - A dropdown for the simulation start type (sunset/sunrise/custom)
@@ -106,6 +111,10 @@ def _build_user_schema(
     Args:
         defaults: Optional dictionary of default values to pre-fill the form
                   fields. Used by the options flow to show current settings.
+        include_name: Whether to include the name field. True for initial
+                      setup (the name is part of the instance's identity);
+                      False for the options flow, where the name lives in
+                      entry.data and is not edited as a runtime option.
 
     Returns:
         A voluptuous Schema for the user step form.
@@ -113,7 +122,19 @@ def _build_user_schema(
     # If no defaults are provided, use sensible initial values.
     defaults = defaults or {}
 
-    return vol.Schema(
+    schema_dict: dict[Any, Any] = {}
+
+    # Name field: only on initial setup. Lets users distinguish multiple
+    # Away Mode instances (e.g. "Downstairs", "Upstairs").
+    if include_name:
+        schema_dict[
+            vol.Optional(
+                CONF_NAME,
+                default=defaults.get(CONF_NAME, DEFAULT_NAME),
+            )
+        ] = TextSelector()
+
+    schema_dict.update(
         {
             # Entity selector: allows multiple selections, filtered to only
             # show entity domains that can be turned on/off meaningfully.
@@ -164,6 +185,8 @@ def _build_user_schema(
             ),
         }
     )
+
+    return vol.Schema(schema_dict)
 
 
 def _build_time_details_schema(
@@ -305,11 +328,9 @@ class AwayModeConfigFlow(ConfigFlow, domain=DOMAIN):
         Returns:
             FlowResult: Either a form to display, an abort, or a created entry.
         """
-        # Prevent multiple instances of the integration.
-        # A single Away Mode config with one set of entities and one time
-        # window covers the typical use case.
-        await self.async_set_unique_id(DOMAIN)
-        self._abort_if_unique_id_configured()
+        # Multiple instances are supported: storage (hass.data[DOMAIN][entry_id])
+        # and entity unique_ids are all keyed by entry_id, so users can run
+        # several Away Mode configs (e.g. "Downstairs", "Upstairs") side by side.
 
         # Track validation errors to display to the user.
         errors: dict[str, str] = {}
@@ -336,10 +357,9 @@ class AwayModeConfigFlow(ConfigFlow, domain=DOMAIN):
                     return await self.async_step_time_details()
 
                 # No custom times needed — resolve and create the entry directly.
-                return self.async_create_entry(
-                    title="Away Mode",
-                    data=_resolve_time_config(user_input),
-                )
+                data = _resolve_time_config(user_input)
+                data[CONF_NAME] = user_input.get(CONF_NAME, DEFAULT_NAME)
+                return self.async_create_entry(title=data[CONF_NAME], data=data)
 
         # Show the form (either first load or after validation errors).
         return self.async_show_form(
@@ -360,7 +380,8 @@ class AwayModeConfigFlow(ConfigFlow, domain=DOMAIN):
         custom value(s) and then creates the config entry.
 
         Args:
-            user_input: The time picker data submitted by the user, or None on first load.
+            user_input: The time picker data submitted by the user, or None
+                        on first load.
 
         Returns:
             FlowResult: Either a form to display or a created entry.
@@ -382,10 +403,9 @@ class AwayModeConfigFlow(ConfigFlow, domain=DOMAIN):
                 # Merge step 1 and step 2 data, resolve to final config format,
                 # and create the config entry.
                 combined = {**self._user_input, **user_input}
-                return self.async_create_entry(
-                    title="Away Mode",
-                    data=_resolve_time_config(combined),
-                )
+                data = _resolve_time_config(combined)
+                data[CONF_NAME] = combined.get(CONF_NAME, DEFAULT_NAME)
+                return self.async_create_entry(title=data[CONF_NAME], data=data)
 
         # Show the time picker form.
         return self.async_show_form(
@@ -452,21 +472,31 @@ class AwayModeOptionsFlow(OptionsFlow):
         # Store step 1 data for combining with step 2 (same pattern as ConfigFlow).
         self._user_input: dict[str, Any] = {}
 
+        # Read the current settings from the merged data/options view so the
+        # form pre-fills with whatever is in effect (options override data).
+        merged = {**config_entry.data, **config_entry.options}
+
         # Determine the current start/end types for pre-filling the dropdowns.
         # If the stored value is "sunset" or "sunrise", the type is that keyword.
         # Otherwise, it's a custom time string.
-        current_start = config_entry.data.get(CONF_TIME_WINDOW_START, "sunset")
-        current_end = config_entry.data.get(CONF_TIME_WINDOW_END, "23:00:00")
+        current_start = merged.get(CONF_TIME_WINDOW_START, "sunset")
+        current_end = merged.get(CONF_TIME_WINDOW_END, "23:00:00")
 
         # Build defaults dict for pre-filling form fields.
         self._defaults: dict[str, Any] = {
-            CONF_ENTITIES: config_entry.data.get(CONF_ENTITIES, []),
-            CONF_START_TYPE: current_start if current_start in ("sunset", "sunrise") else "custom",
-            CONF_END_TYPE: current_end if current_end in ("sunset", "sunrise") else "custom",
-            CONF_INTENSITY: config_entry.data.get(CONF_INTENSITY, DEFAULT_INTENSITY),
+            CONF_ENTITIES: merged.get(CONF_ENTITIES, []),
+            CONF_START_TYPE: (
+                current_start
+                if current_start in ("sunset", "sunrise")
+                else "custom"
+            ),
+            CONF_END_TYPE: (
+                current_end if current_end in ("sunset", "sunrise") else "custom"
+            ),
+            CONF_INTENSITY: merged.get(CONF_INTENSITY, DEFAULT_INTENSITY),
         }
 
-        # If the current values are custom times, store them for the time picker defaults.
+        # If the current values are custom times, store them for the pickers.
         if current_start not in ("sunset", "sunrise"):
             self._defaults[CONF_CUSTOM_START_TIME] = current_start
         if current_end not in ("sunset", "sunrise"):
@@ -506,20 +536,20 @@ class AwayModeOptionsFlow(OptionsFlow):
                 if needs_custom_start or needs_custom_end:
                     return await self.async_step_time_details()
 
-                # No custom times — update entry.data directly (not entry.options)
-                # so the engine reads the new config on reload.
-                # OptionsFlow.async_create_entry saves to entry.options by default,
-                # which the engine doesn't read — so we update entry.data explicitly.
-                new_data = _resolve_time_config(user_input)
-                self.hass.config_entries.async_update_entry(
-                    self._config_entry, data=new_data
+                # No custom times — save the tunable settings to entry.options.
+                # The engine reads {**entry.data, **entry.options}, and the
+                # update listener applies the change in place (no reload).
+                return self.async_create_entry(
+                    title="", data=_resolve_time_config(user_input)
                 )
-                return self.async_create_entry(data={})
 
-        # Show the form with current settings as defaults.
+        # Show the form with current settings as defaults. The name is not an
+        # editable option (it lives in entry.data), so hide it here.
         return self.async_show_form(
             step_id="init",
-            data_schema=_build_user_schema(defaults=self._defaults),
+            data_schema=_build_user_schema(
+                defaults=self._defaults, include_name=False
+            ),
             errors=errors,
         )
 
@@ -552,12 +582,10 @@ class AwayModeOptionsFlow(OptionsFlow):
 
             if not errors:
                 combined = {**self._user_input, **user_input}
-                # Update entry.data directly so the engine reads the new config.
-                new_data = _resolve_time_config(combined)
-                self.hass.config_entries.async_update_entry(
-                    self._config_entry, data=new_data
+                # Save the tunable settings to entry.options (see async_step_init).
+                return self.async_create_entry(
+                    title="", data=_resolve_time_config(combined)
                 )
-                return self.async_create_entry(data={})
 
         # Show time pickers with current values as defaults.
         return self.async_show_form(

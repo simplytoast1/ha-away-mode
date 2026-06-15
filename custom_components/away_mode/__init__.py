@@ -88,8 +88,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Store the engine in hass.data so the switch platform can access it.
     # We use a nested dict: hass.data[DOMAIN][entry.entry_id] = engine
-    # This pattern supports multiple config entries (though we currently
-    # limit to one via the config flow).
+    # keyed by entry_id, which supports multiple config entries (instances).
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = engine
 
@@ -154,21 +153,22 @@ async def _async_update_listener(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
     """
-    Handle options flow updates by reloading the integration.
+    Handle options flow updates by reconfiguring the engine in place.
 
     When the user changes settings via the options flow (e.g., adds/removes
     entities, changes the time window, or adjusts intensity), this listener
-    triggers a full reload of the integration. This is simpler and more
-    reliable than trying to hot-patch a running simulation engine.
+    asks the existing engine to apply the new config without a full reload.
 
-    The reload process:
-      1. async_unload_entry is called (stops engine, cleans up)
-      2. async_setup_entry is called with updated config (creates fresh engine)
-      3. The switch entity is recreated and may restore its previous state
+    A full reload would stop the engine and turn off every currently simulated
+    entity, producing a visible "all lights off" flicker. SimulationEngine's
+    update_config() instead refreshes its config, turns off only entities that
+    were removed, and reschedules timers — leaving unchanged lit entities alone.
 
     Args:
         hass: The Home Assistant instance.
         entry: The config entry that was updated.
     """
-    _LOGGER.info("Away Mode configuration updated, reloading integration")
-    await hass.config_entries.async_reload(entry.entry_id)
+    _LOGGER.info("Away Mode configuration updated, applying in place")
+    engine: SimulationEngine | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if engine is not None:
+        engine.update_config()

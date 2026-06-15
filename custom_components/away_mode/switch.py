@@ -20,9 +20,10 @@ Design decisions:
     re-starts the simulation engine. Without this, HA restarts would silently
     disable the simulation, defeating its purpose.
 
-  - **Single entity per entry**: Each config entry creates exactly one switch.
-    Since we limit to one config entry via the config flow, there's always
-    exactly one Away Mode switch in the system.
+  - **One switch per entry**: Each config entry creates exactly one switch,
+    grouped under a per-entry service device. Multiple entries are supported,
+    so there can be several Away Mode switches (one per configured instance),
+    each with its own name.
 
 Usage examples:
 
@@ -46,11 +47,13 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import DEFAULT_NAME, DOMAIN
 from .simulation import SimulationEngine
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,8 +131,24 @@ class AwayModeSwitch(SwitchEntity, RestoreEntity):
         # integration is removed and re-added.
         self._attr_unique_id = f"{entry.entry_id}_away_mode"
 
-        # Human-readable name shown in the UI.
-        self._attr_name = "Away Mode"
+        # The instance name comes from the merged config (options override data).
+        name = {**entry.data, **entry.options}.get(CONF_NAME, DEFAULT_NAME)
+
+        # Group this entity under a virtual service device so it isn't an
+        # orphan in the dashboard, and so multiple instances appear as
+        # separate, distinctly named devices.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=name,
+            manufacturer="Away Mode",
+            model="Presence Simulator",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+        # With has_entity_name set and a device present, leaving the entity
+        # name as None makes the switch adopt the device name (the configured
+        # instance name), e.g. "Away Mode" -> switch.away_mode.
+        self._attr_name = None
 
         # Initial icon (will be overridden by the icon property).
         self._attr_icon = "mdi:home-account"

@@ -40,7 +40,15 @@ import math
 import random
 from datetime import date, datetime, timedelta
 from typing import Any
+
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -117,6 +125,12 @@ class SimulationEngine:
         self.hass = hass
         self._entry = entry
 
+        # Merged view of the user's configuration. Setup config lives in
+        # entry.data; reconfiguration via the options flow lands in
+        # entry.options and overrides data. Reading the merge keeps existing
+        # entries (config in data, empty options) working with no migration.
+        self._config: dict[str, Any] = {**entry.data, **entry.options}
+
         # Whether the simulation is currently running.
         # This flag is checked by the switch entity to report its state.
         self._is_running: bool = False
@@ -155,9 +169,17 @@ class SimulationEngine:
         """
         return self._is_running
 
+    def _refresh_config(self) -> None:
+        """Refresh the merged config cache from the (possibly updated) entry."""
+        self._config = {**self._entry.data, **self._entry.options}
+
+    def _cfg(self, key: str, default: Any = None) -> Any:
+        """Read a config value from the merged data/options view."""
+        return self._config.get(key, default)
+
     def _get_intensity_profile(self) -> dict[str, Any]:
         """Return the intensity profile dict, falling back if data is invalid."""
-        intensity = self._entry.data.get(CONF_INTENSITY, DEFAULT_INTENSITY)
+        intensity = self._cfg(CONF_INTENSITY, DEFAULT_INTENSITY)
         if intensity not in INTENSITY_PROFILES:
             _LOGGER.warning(
                 "Unknown intensity %r, using default %r",
@@ -259,6 +281,52 @@ class SimulationEngine:
 
         _LOGGER.info("Away Mode simulation engine stopped, all entities turned off")
 
+    def update_config(self) -> None:
+        """
+        Apply a configuration change in place, without a full reload.
+
+        Called from the config-entry update listener when the user saves the
+        options flow. A full async_reload would stop the engine and turn off
+        every currently simulated entity, producing a visible "all lights off"
+        flicker before the fresh engine slowly re-lights the house. Instead we:
+
+          1. Refresh the merged config cache so subsequent reads see new values.
+          2. Turn off only entities that were removed from the configured list.
+          3. If running, reschedule the window/event timers against the new
+             config (mirroring the midnight recalculation). Entities that are
+             still configured and currently lit keep their existing turn-off
+             timers, so they are left undisturbed — no flicker.
+
+        Intensity and on/off durations need no special handling because they
+        are read per-event from the refreshed config.
+        """
+        self._refresh_config()
+
+        # Turn off any entities that are no longer configured.
+        configured = set(self._cfg(CONF_ENTITIES, []))
+        for entity_id in list(self._active_entities):
+            if entity_id not in configured:
+                cancel_turn_off = self._active_entities.pop(entity_id)
+                cancel_turn_off()
+                self._turn_off_entity_service(entity_id)
+
+        if not self._is_running:
+            # Nothing is scheduled while stopped; the refreshed config will be
+            # used the next time the switch is turned on.
+            return
+
+        # Reschedule one-shot window/event timers against the new config.
+        # The recurring midnight listener (_midnight_unsub) is left in place.
+        for cancel_cb in self._scheduled_callbacks:
+            try:
+                cancel_cb()
+            except Exception:  # noqa: BLE001
+                pass
+        self._scheduled_callbacks.clear()
+
+        self._setup_daily_schedule()
+        _LOGGER.info("Away Mode configuration applied in place")
+
     # =========================================================================
     # Daily Schedule Setup
     # =========================================================================
@@ -283,19 +351,9 @@ class SimulationEngine:
         """
         now = dt_util.now()
 
-        # Resolve "sunset"/"sunrise"/time strings to concrete datetimes.
-        window_start = self._resolve_time(
-            self._entry.data.get(CONF_TIME_WINDOW_START, "sunset")
-        )
-        window_end = self._resolve_time(
-            self._entry.data.get(CONF_TIME_WINDOW_END, "23:00:00")
-        )
-
-        # Handle overnight windows (e.g., "sunset" to "sunrise" or "22:00" to "02:00").
-        # If the resolved end time is before the start time, it means the window
-        # spans midnight, so we push the end to tomorrow.
-        if window_end <= window_start:
-            window_end += timedelta(days=1)
+        # Resolve the configured window to concrete datetimes, handling
+        # windows that cross midnight (see _resolve_window).
+        window_start, window_end = self._resolve_window(now)
 
         _LOGGER.info(
             "Away Mode time window resolved: %s to %s (now: %s)",
@@ -358,6 +416,48 @@ class SimulationEngine:
     # =========================================================================
     # Time Resolution
     # =========================================================================
+
+    def _resolve_window(self, now: datetime) -> tuple[datetime, datetime]:
+        """
+        Resolve the configured window to concrete datetimes around ``now``.
+
+        Handles windows that cross midnight. ``_resolve_time`` always anchors
+        to today's date, so for an overnight window (resolved end <= resolved
+        start, e.g. 22:00 -> 02:00 or sunset -> sunrise) we have to decide
+        which day the active interval belongs to:
+
+          - If ``now`` is in the post-midnight tail (now < resolved end), the
+            window actually opened the previous evening, so anchor the start to
+            yesterday and keep the end today. This is the case that the old
+            one-sided ``window_end += 1 day`` logic missed, leaving the engine
+            idle from midnight until the end time.
+          - Otherwise we are before tonight's opening (or in the daytime gap),
+            so push the end into tomorrow.
+
+        Daytime windows (end > start) are returned unchanged.
+
+        Args:
+            now: The reference instant (timezone-aware) to position the window
+                 around.
+
+        Returns:
+            A (window_start, window_end) tuple of timezone-aware datetimes with
+            window_start < window_end.
+        """
+        window_start = self._resolve_time(self._cfg(CONF_TIME_WINDOW_START, "sunset"))
+        window_end = self._resolve_time(self._cfg(CONF_TIME_WINDOW_END, "23:00:00"))
+
+        if window_end <= window_start:
+            # Overnight window: it spans midnight.
+            if now < window_end:
+                # We are in the morning tail of the window that opened
+                # yesterday evening.
+                window_start -= timedelta(days=1)
+            else:
+                # We are before tonight's opening (or in the daytime gap).
+                window_end += timedelta(days=1)
+
+        return window_start, window_end
 
     def _sun_event_on_date(self, event: str, day: date) -> datetime:
         """Resolve sunset or sunrise on a calendar day, with polar-edge fallback."""
@@ -454,16 +554,10 @@ class SimulationEngine:
 
         _LOGGER.info("Simulation window has opened, beginning entity scheduling")
 
-        # Resolve the end time again to get an accurate value.
-        # (Sunset/sunrise times are very slightly different from when we
-        # first resolved them, but this ensures maximum accuracy.)
-        window_end = self._resolve_time(
-            self._entry.data.get(CONF_TIME_WINDOW_END, "23:00:00")
-        )
-
-        # Handle overnight: if end is before now, push to tomorrow.
-        if window_end <= now:
-            window_end += timedelta(days=1)
+        # Re-resolve the window now that it has opened. This picks up the
+        # accurate sunset/sunrise instant for today and applies the same
+        # crossing-midnight handling as _setup_daily_schedule.
+        _, window_end = self._resolve_window(now)
 
         # Start the scheduling loop.
         self._schedule_next_event(window_end)
@@ -672,8 +766,8 @@ class SimulationEngine:
         Returns:
             The entity_id to activate, or None if at capacity or no entities available.
         """
-        # Get all configured entities from the config entry.
-        all_entities = self._entry.data.get(CONF_ENTITIES, [])
+        # Get all configured entities from the merged config.
+        all_entities = self._cfg(CONF_ENTITIES, [])
 
         if not all_entities:
             _LOGGER.warning("No entities configured for simulation")
@@ -695,13 +789,26 @@ class SimulationEngine:
             )
             return None
 
-        # Build the list of available entities (not currently active).
-        available = [e for e in all_entities if e not in self._active_entities]
+        # Build the list of available entities: configured, not currently
+        # active, and reachable. We skip entities whose state is unavailable
+        # or unknown (e.g. a bulb powered off at the wall, or one that has
+        # gone offline) because turning them on is a no-op that would still
+        # consume a simultaneous-on slot and make the home look less active.
+        # We deliberately do NOT skip the "off" state — an off entity is
+        # exactly what we want to turn on.
+        available = []
+        for entity_id in all_entities:
+            if entity_id in self._active_entities:
+                continue
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                continue
+            available.append(entity_id)
 
         if not available:
-            # All entities are currently on (shouldn't happen due to cap check,
-            # but handle it gracefully).
-            _LOGGER.debug("No available entities (all are currently active)")
+            # Nothing reachable to turn on right now (all active, offline, or
+            # not yet present in the state machine). Skip this cycle.
+            _LOGGER.debug("No available entities (all active or unavailable)")
             return None
 
         # Calculate weights for each available entity.
@@ -735,7 +842,7 @@ class SimulationEngine:
             "Chose entity %s from %d available (weights: %s)",
             chosen,
             len(available),
-            {e: f"{w:.1f}" for e, w in zip(available, weights)},
+            {e: f"{w:.1f}" for e, w in zip(available, weights, strict=True)},
         )
 
         return chosen
@@ -850,9 +957,10 @@ class SimulationEngine:
         self.hass.async_create_task(
             self.hass.services.async_call(
                 domain,
-                "turn_on",
-                service_data={"entity_id": entity_id},
-            )
+                SERVICE_TURN_ON,
+                service_data={ATTR_ENTITY_ID: entity_id},
+            ),
+            name=f"away_mode_turn_on_{entity_id}",
         )
 
     def _turn_off_entity_service(self, entity_id: str) -> None:
@@ -872,7 +980,8 @@ class SimulationEngine:
         self.hass.async_create_task(
             self.hass.services.async_call(
                 domain,
-                "turn_off",
-                service_data={"entity_id": entity_id},
-            )
+                SERVICE_TURN_OFF,
+                service_data={ATTR_ENTITY_ID: entity_id},
+            ),
+            name=f"away_mode_turn_off_{entity_id}",
         )
